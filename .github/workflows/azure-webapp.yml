@@ -1,0 +1,86 @@
+name: Create Azure Web App and deploy .NET app
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: rg-az400-demo
+  LOCATION: centralindia
+  APP_SERVICE_PLAN: plan-az400-demo
+  WEBAPP_NAME: az400-dotnet-demo-ajay # must be globally unique
+  DOTNET_VERSION: '8.0.x'
+  RUNTIME: 'DOTNETCORE:8.0'
+  PUBLISH_DIR: ./publish
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore, build, test, publish
+        run: |
+          dotnet restore
+          dotnet build --configuration Release --no-restore
+          dotnet test --configuration Release --no-build
+          dotnet publish --configuration Release --no-build --output "${{ env.PUBLISH_DIR }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-app
+          path: ${{ env.PUBLISH_DIR }}
+          if-no-files-found: error
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: production
+      url: https://${{ env.WEBAPP_NAME }}.azurewebsites.net
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: dotnet-app
+          path: ${{ env.PUBLISH_DIR }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create resource group, plan and web app (idempotent)
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az group create --name "$RESOURCE_GROUP" --location "$LOCATION"
+            az appservice plan create --name "$APP_SERVICE_PLAN" \
+              --resource-group "$RESOURCE_GROUP" --sku B1 --is-linux
+            az webapp create --name "$WEBAPP_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --plan "$APP_SERVICE_PLAN" \
+              --runtime "$RUNTIME"
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.WEBAPP_NAME }}
+          package: ${{ env.PUBLISH_DIR }}
+
+      - name: Logout
+        if: always()
+        run: az logout
